@@ -1,73 +1,58 @@
-
 # Lab 04 — Secrets Management and Azure Key Vault
 
 ## Overview
 
-This lab focused on securing application secrets that cannot be eliminated through identity-based authentication.
+In this lab, I focused on how I would secure application secrets in Azure when the secret cannot be eliminated completely.
 
-The goal was not simply to store a secret in Azure Key Vault. The goal was to design the security layers around that secret, including identity, authorization, network exposure, lifecycle management, recovery, and monitoring.
+My main takeaway from this lab was that putting a secret in Azure Key Vault does not automatically make the entire design secure. Key Vault solves the storage problem, but I still have to think about who is accessing the secret, what permissions they have, how the application authenticates, how the traffic reaches Key Vault, how the secret is rotated, and what happens if something gets compromised.
 
-The scenario involved a ContosoWorks application that integrates with a third-party payment provider requiring an API key.
-
-Because the third-party provider requires a credential, the secret cannot currently be replaced with Microsoft Entra authentication or Managed Identity.
+The scenario for this lab involved a ContosoWorks application that needs an API key to communicate with a third-party payment provider.
 
 ---
 
 ## Scenario
 
-The ContosoWorks application requires the following third-party credential:
+The application requires:
 
 ```text
 PAYMENT_API_KEY
 ```
 
-The security requirements were:
+My first question was:
 
-- Do not store the API key in application code.
-- Do not store the API key in application configuration.
-- Do not expose the credential through source control.
-- Centralize secret storage.
-- Apply least-privilege access.
-- Establish an expiration and rotation strategy.
-- Protect against accidental or malicious deletion.
-- Consider network exposure.
-- Maintain visibility into secret access.
+> Does this secret actually need to exist?
 
----
+If the application was connecting to an Azure service that supported Microsoft Entra authentication, I would prefer to eliminate the credential and use Managed Identity.
 
-## Security Design
+In this case, however, the third-party provider requires an API key.
 
-The first design decision was determining whether the secret could be eliminated.
+That means the secret cannot currently be eliminated.
+
+So the design becomes:
 
 ```text
-Application requires credential
-          |
-          v
-Can the credential be eliminated?
-       /        \
-     YES         NO
-      |           |
-Managed Identity  Secret must exist
-Entra ID          |
-                  v
-             Azure Key Vault
-                  |
-             Managed Identity
-                  |
-          Runtime retrieval
+Third-Party Provider
+        |
+   Issues API Key
+        |
+        v
+Azure Key Vault
+        ^
+        |
+Managed Identity
+        |
+ContosoWorks Application
 ```
 
-For Azure services that support Microsoft Entra authentication, Managed Identity should be preferred over long-lived credentials.
-
-In this scenario, however, the payment provider requires an API key. Therefore, the credential still has to exist and must be securely managed.
+The goal is to keep the API key out of application code, configuration files, source control, and CI/CD variables where possible.
 
 ---
 
-## Key Vault Deployment
+# 1. Secure Secret Storage
 
-A Standard Azure Key Vault was deployed in the existing ContosoWorks development environment.
+I created an Azure Key Vault in the existing ContosoWorks development environment.
 
-### Resource Configuration
+### Configuration
 
 | Setting | Configuration |
 |---|---|
@@ -79,15 +64,19 @@ A Standard Azure Key Vault was deployed in the existing ContosoWorks development
 | Network Access | All networks |
 | Private Endpoint | Not configured |
 
-Public network access was intentionally left enabled during this phase.
+I intentionally left public network access enabled during this phase because I wanted to focus first on identity, authorization, and secret management.
 
-Private connectivity will be addressed separately so that identity, authorization, secret lifecycle, and networking can be evaluated as independent security layers.
+I already know this is something I would revisit for a production environment.
+
+If the application only needs private connectivity, there is no reason to leave an unnecessary public network path available.
+
+That becomes the focus of the next lab.
 
 ---
 
 ## Resource Tags
 
-The following tags were applied:
+I added:
 
 ```text
 Environment = Dev
@@ -96,95 +85,86 @@ ManagedBy   = Manual
 Purpose     = SecurityLab
 ```
 
-Tags do not provide security enforcement by themselves, but they provide useful metadata for ownership, environment identification, cost management, automation, and governance.
+The tags themselves are not security controls.
 
-A future phase can use Azure Policy to enforce required tagging standards.
+I am using them to identify the environment, project, purpose, and how the resource is currently being managed.
 
----
-
-## Permission Model
-
-Azure RBAC was selected instead of the legacy Key Vault access-policy model.
-
-This allows Key Vault permissions to align with the broader Azure RBAC authorization model:
-
-```text
-Principal + Role + Scope
-```
-
-No additional resource-access options were enabled because the current architecture did not require:
-
-- Azure Virtual Machines for deployment
-- Azure Resource Manager for template deployment
-- Azure Disk Encryption
-
-This followed the principle of enabling only capabilities required by the workload.
+Later, instead of relying on someone to remember to add the correct tags, I can use Azure Policy and Infrastructure as Code to enforce the standard.
 
 ---
 
-## Control Plane vs. Data Plane
+# 2. Authentication vs. Authorization
 
-One of the most important lessons from this lab occurred while creating the first secret.
+One of the best hands-on lessons from this lab happened when I tried to create the secret.
 
-Although my user could access and manage the Azure Key Vault resource, attempting to create a secret initially failed with an RBAC authorization error.
+I could see and manage the Key Vault resource in Azure, but when I tried to create a secret, Azure denied the operation because of RBAC.
 
-This demonstrated the separation between the Azure control plane and Key Vault data plane.
+That immediately demonstrated something important:
+
+> Being able to manage the Key Vault resource does not automatically mean I can access or manage the secrets inside it.
+
+This is the difference between the **control plane** and the **data plane**.
 
 ```text
 CONTROL PLANE
-
+-------------------------
 Manage Key Vault resource
 View configuration
 Configure networking
-Configure resource settings
+Manage resource settings
 
 
 DATA PLANE
-
+-------------------------
 Create secrets
 Read secret values
 Update secrets
 Delete secrets
 ```
 
-Being able to manage or view the Key Vault resource does not automatically provide access to the secrets stored inside it.
+I had access to the resource, but I did not yet have the data-plane permission required to create the secret.
 
 ---
 
-## Resolving the RBAC Failure
+# 3. Applying Least Privilege
 
-My user required permission to create and manage secrets during the lab.
+To create and manage secrets for the lab, I needed an additional Key Vault role.
 
-Instead of assigning a broader Key Vault administrative role, I used:
+I could have assigned myself a very broad administrative role, but I did not need permissions to manage everything in Key Vault.
+
+I only needed to manage secrets.
+
+I therefore used:
 
 ```text
+Principal:
+My lab user
+
 Role:
 Key Vault Secrets Officer
 
 Scope:
-Specific ContosoWorks Key Vault
+ContosoWorks Key Vault
 ```
 
-This provided the permissions required to manage secrets without unnecessarily granting broader key and certificate administration capabilities.
+After the role assignment was applied, I was able to create the secret.
 
-After the role assignment was applied, the secret was successfully created.
+This reinforced another security principle for me:
 
-This reinforced an important principle:
-
-> Authentication does not equal authorization, and control-plane access does not automatically provide data-plane access.
+> Least privilege is not just about whether someone gets access. It is also about how much access they receive and where that access applies.
 
 ---
 
-## Secret Creation
+# 4. Creating the Secret
 
-The following lab secret was created:
+I created:
 
 ```text
 Name:
 payment-api-key
 
 Value:
-Fake lab credential
+Fake lab API credential
 
 Content Type:
 API Key
@@ -196,17 +176,27 @@ Expiration:
 Approximately 90 days
 ```
 
-Only a fake credential was used.
+Only a fake credential was used for this lab.
 
-Real API keys, passwords, tokens, or production secrets should never be committed to this repository.
+Real passwords, API keys, tokens, or production secrets should never be committed to this repository.
 
 ---
 
-## Application Authentication
+# 5. How the Application Should Authenticate
 
-The application should not use an Azure client secret to authenticate to Key Vault.
+I would not want the application using something like:
 
-Instead, the intended production design uses a Managed Identity.
+```text
+AZURE_CLIENT_ID
+AZURE_CLIENT_SECRET
+AZURE_TENANT_ID
+```
+
+with a long-lived Azure client secret just so that it can retrieve another secret.
+
+That creates another credential I now have to protect.
+
+Instead, I would use Managed Identity.
 
 ```text
 Application
@@ -216,33 +206,37 @@ Managed Identity
      v
 Microsoft Entra ID
      |
-Short-lived access token
+Short-Lived Token
      |
      v
 Azure Key Vault
 ```
 
-This removes the need to store a long-lived Azure credential inside the application.
+Azure manages the workload identity, and the application can request a token at runtime.
 
-Managed Identity solves the application's authentication problem.
+This removes the need for me to store and rotate an Azure client secret inside the application.
 
-It does **not**, however, automatically authorize the application to retrieve secrets.
+However, Managed Identity answers only one question:
+
+> Who is this workload?
+
+It does not answer:
+
+> What is this workload allowed to access?
+
+That still requires authorization.
 
 ---
 
-## Application Authorization
+# 6. Application Authorization
 
-The application only requires permission to retrieve existing secrets.
+If the application only needs to retrieve an existing secret, I would not give it Key Vault Secrets Officer, Contributor, Owner, or Key Vault Administrator.
 
-The appropriate Azure RBAC role is:
+The application does not need those permissions.
 
-```text
-Key Vault Secrets User
-```
+It only needs to retrieve the secret.
 
-A broader role such as Contributor, Owner, Key Vault Administrator, or Key Vault Secrets Officer would provide unnecessary permissions.
-
-The intended authorization model is:
+The intended role is:
 
 ```text
 Principal:
@@ -252,33 +246,46 @@ Role:
 Key Vault Secrets User
 
 Scope:
-Required Key Vault or individual secret
+Required Key Vault or Secret
 ```
 
-No application identity was deployed during this lab because compute resources were intentionally avoided to keep the lab cost minimal.
+I did not deploy compute during this phase because I wanted to keep the lab cost as low as possible.
 
-The application-side role assignment therefore remained an architectural design rather than a deployed configuration.
+Because there is no application workload yet, I did not create or attach an application Managed Identity. This part of the architecture remains a design that I will implement when the workload exists.
 
 ---
 
-## Vault-Level vs. Secret-Level Authorization
+# 7. Thinking About Blast Radius
 
-If a Key Vault contains secrets for multiple unrelated applications, assigning `Key Vault Secrets User` at the entire vault scope may give a compromised workload access to secrets it does not require.
+This became one of the most important parts of the lab for me.
 
-For example:
+Suppose I eventually have:
 
 ```text
 Key Vault
+
 ├── payment-api-key
 ├── sendgrid-api-key
 └── payroll-api-key
 ```
 
-The Payment application should not automatically gain access to the Notification or HR application's credentials.
+And I have three applications:
 
-Two designs can be considered.
+```text
+Payment App
+Notification App
+HR App
+```
 
-### Separate Vault Boundaries
+Before giving all three applications `Key Vault Secrets User` at the entire vault scope, I would first ask:
+
+> Does the Payment application actually need access to the Notification or HR application's secrets?
+
+If the answer is no, then I don't want compromising the Payment application to automatically expose credentials belonging to unrelated applications.
+
+I have a few ways I could design around that.
+
+### Option 1 — Separate Security Boundaries
 
 ```text
 kv-payments-prod
@@ -291,335 +298,387 @@ kv-hr-prod
 └── payroll-api-key
 ```
 
-### Fine-Grained RBAC
+Each application gets access only to its own vault.
+
+### Option 2 — More Granular Authorization
+
+If there is a reason to use a shared vault, Azure RBAC can also be scoped more granularly.
+
+Conceptually:
 
 ```text
-Shared Key Vault
-
-payment-api-key
-     ↑
 Payment Managed Identity
-
-sendgrid-api-key
-     ↑
-Notification Managed Identity
-
-payroll-api-key
-     ↑
-HR Managed Identity
+        |
+Key Vault Secrets User
+        |
+payment-api-key only
 ```
 
-Azure RBAC can be scoped to an individual Key Vault secret when finer-grained authorization is justified.
+The Payment application could retrieve:
 
-The appropriate design depends on isolation requirements, operational complexity, scale, and manageability.
+```text
+payment-api-key ✓
+```
 
-Infrastructure as Code can make fine-grained RBAC significantly easier to deploy consistently, but automation does not remove the need for good security boundaries.
+but not:
+
+```text
+sendgrid-api-key ✗
+payroll-api-key ✗
+```
+
+I would not automatically choose one design for every environment.
+
+I would look at the isolation requirements, number of applications, operational complexity, and how permissions are going to be managed.
+
+For workloads with stronger separation requirements, such as HR and Payments, separate vault boundaries may make more sense.
+
+For cases where finer-grained permissions are justified, Infrastructure as Code can make those RBAC assignments easier to manage consistently.
+
+The security goal stays the same:
+
+> If one workload is compromised, I want to reduce what the attacker can access with that workload's identity.
 
 ---
 
-## Managed Identity vs. Key Vault
+# 8. Managed Identity Does Not Eliminate Every Secret
 
-Managed Identity and Key Vault solve different security problems.
+Another important distinction from this lab is that Managed Identity does not automatically mean the application is completely secretless.
 
-### Managed Identity
-
-Answers:
-
-> How does the workload authenticate to Azure without storing an Azure credential?
-
-### Key Vault
-
-Answers:
-
-> Where do credentials, keys, and certificates that still need to exist get securely stored and managed?
-
-The stronger design is always to eliminate a secret where possible.
+In this scenario:
 
 ```text
-Least Preferred
-
 Application
-    |
-Hardcoded credential
-
-
-Better
-
-Application
-    |
+     |
 Managed Identity
-    |
-Key Vault
-    |
-Third-party credential
+     |
+     v
+Azure Key Vault
+     |
+     v
+PAYMENT_API_KEY
+     |
+     v
+Third-Party Provider
+```
 
+Managed Identity eliminates the Azure credential the application would otherwise need to authenticate to Key Vault.
 
-Strongest where supported
+But the third-party API key still exists.
+
+So I think about secret management as a maturity model:
+
+```text
+BEST WHERE SUPPORTED
 
 Application
-    |
-Managed Identity
-    |
-Entra token
-    |
+     |
+Managed Identity / Federation
+     |
+Short-Lived Token
+     |
 Target Service
 
-No application-managed password
+No long-lived application secret
+
+
+BETTER
+
+Application
+     |
+Managed Identity
+     |
+Key Vault
+     |
+Third-Party Secret
+
+
+WORST
+
+Application
+     |
+Hardcoded Secret
 ```
+
+My first choice is always to ask whether I can eliminate the secret.
+
+If I cannot eliminate it, then I protect it properly.
 
 ---
 
-## Secret Rotation
+# 9. Secret Expiration Is Not Secret Rotation
 
-Adding an expiration date to a Key Vault secret does not automatically rotate the credential at the third-party provider.
+I configured an expiration period for the API key.
 
-For a third-party API key, rotation requires coordination between the credential issuer and Key Vault.
+But one thing I learned is that expiration does not mean Azure Key Vault automatically rotates a third-party credential.
 
-A safe rotation process could be:
+Key Vault stores the credential.
+
+The third-party provider is still the system that issues the credential.
+
+So a real rotation process would look more like:
 
 ```text
-Generate new credential at provider
-          |
-          v
-Store new secret version in Key Vault
-          |
-          v
-Application retrieves new credential
-          |
-          v
-Validate application functionality
-          |
-          v
-Revoke old credential at provider
+Generate new key at provider
+        |
+        v
+Store new version in Key Vault
+        |
+        v
+Application retrieves new key
+        |
+        v
+Validate application
+        |
+        v
+Revoke old key at provider
 ```
 
-Where the provider supports overlapping credentials, the new credential should be validated before the previous credential is revoked.
+If the provider allows two credentials to exist temporarily, I would prefer to validate the new credential before revoking the old one.
 
-At larger scale, this workflow should be automated where provider APIs and operational requirements allow.
+That reduces the chance of causing an outage during rotation.
+
+At scale, I would automate as much of this process as the provider allows.
 
 ---
 
-## Secret Versioning
+# 10. Secret Versions
 
-Azure Key Vault supports multiple versions of a secret.
+Key Vault can maintain multiple versions of a secret.
 
 For example:
 
 ```text
 payment-api-key
-├── Version 1
-├── Version 2
-└── Version 3
+
+Version 1
+Version 2
+Version 3
 ```
 
-Applications can generally retrieve the current version without hardcoding a specific version.
+This means an application can normally retrieve the current version instead of having a particular secret version permanently hardcoded into the application.
 
-This helps support controlled secret rotation while maintaining a history of secret versions.
+Versioning also helps support controlled rotation.
 
 ---
 
-## Recovery Protection
+# 11. Recovery — Soft Delete and Purge Protection
 
-Two important recovery controls were reviewed:
+I also reviewed what happens if someone deletes a secret.
+
+There are two important protections:
 
 ### Soft Delete
 
-Deleted Key Vault objects remain recoverable during the configured retention period.
-
-This helps protect against accidental deletion.
+If a secret is deleted, it can remain recoverable during the configured retention period.
 
 ### Purge Protection
 
-Purge protection prevents a deleted Key Vault object from being permanently destroyed before the retention period expires.
+Purge protection prevents someone from permanently destroying the deleted object before that retention period ends.
 
-Together, these controls help reduce the impact of both accidental and malicious deletion.
+I think about this from both an accidental and malicious perspective.
 
-They should not be confused with a complete backup or disaster-recovery strategy.
+Someone could delete a secret by mistake.
+
+But if an attacker gains privileged access, they may also intentionally try to destroy important secrets or keys.
+
+Soft delete and purge protection make that type of destructive action harder to turn into permanent data loss.
+
+These controls provide deletion protection and recovery, but I would not treat them as a complete backup or disaster-recovery strategy.
 
 ---
 
-## Network Security Review
+# 12. Network Exposure
 
-During this phase, the Key Vault remained configured with:
+At the end of this phase, my Key Vault still has:
 
 ```text
-Public network access: Enabled
-Network access: All networks
+Public Network Access:
+Enabled
+
+Network Access:
+All Networks
 ```
 
-This does **not** mean anonymous Internet users can retrieve secrets.
+That does **not** mean someone on the internet can automatically retrieve my secrets.
 
-Authentication and authorization are still required.
+They would still need to authenticate and have the required authorization.
 
-However, if the application only requires private connectivity, leaving an unnecessary public network path increases exposure.
+However, I still ask:
 
-The production architecture should therefore evaluate:
+> If my application is internal, why should the internet be able to reach the Key Vault endpoint in the first place?
+
+If public connectivity is not required, I would rather remove that unnecessary network path.
+
+The target architecture becomes:
 
 ```text
 Application
      |
-Private network
+Private Azure Network
      |
 Private Endpoint
      |
 Azure Key Vault
 ```
 
-After private connectivity and DNS resolution are validated, unnecessary public network access can be restricted or disabled.
+After validating private connectivity and DNS resolution, I could restrict or disable unnecessary public network access.
 
-This design will be addressed in the next lab.
-
----
-
-## Monitoring and Detection
-
-Secure secret storage is not enough.
-
-The environment should provide visibility into:
-
-- Successful secret retrieval
-- Failed authorization attempts
-- Unexpected access patterns
-- Key Vault configuration changes
-- RBAC changes
-- Secret deletion
-- Secret lifecycle and rotation failures
-
-Key Vault diagnostic and audit telemetry can be centralized and used with the organization's monitoring and detection platform.
-
-This allows the security architecture to move beyond prevention and support detection and investigation.
+This reduces network exposure while identity and RBAC continue protecting the resource.
 
 ---
 
-## Defense-in-Depth Model
+# 13. Monitoring and Detection
 
-The final design can be viewed as multiple security layers:
+Even with all of these preventative controls, I still need visibility.
+
+I would want to know:
+
+- Who or what is retrieving secrets?
+- Are there unexpected authorization failures?
+- Are secrets being accessed at unusual times or by unexpected identities?
+- Did someone change Key Vault configuration?
+- Did someone modify RBAC?
+- Was a secret deleted?
+- Did a rotation process fail?
+
+I would enable the appropriate Key Vault diagnostic and audit logging and centralize the security telemetry so that suspicious activity can be detected and investigated.
+
+My assumption is not that prevention will always work.
+
+My assumption is that if something does go wrong, I need enough visibility to know about it.
+
+---
+
+# My Defense-in-Depth Model
+
+By the end of this lab, I stopped thinking about Key Vault as a single security control.
+
+I think about secrets security in layers:
 
 ```text
-1. Secret Elimination
-        |
-        v
-2. Secure Storage
-        |
-        v
-3. Workload Identity
-        |
-        v
-4. Least-Privilege Authorization
-        |
-        v
-5. Network Isolation
-        |
-        v
-6. Lifecycle + Recovery
-        |
-        v
-7. Monitoring + Detection
+1. Can I eliminate the secret?
+             |
+             v
+2. If not, where do I store it?
+             |
+             v
+3. How does the workload authenticate?
+             |
+             v
+4. What is it authorized to access?
+             |
+             v
+5. What network path can reach it?
+             |
+             v
+6. How is the secret rotated and recovered?
+             |
+             v
+7. How do I detect suspicious activity?
 ```
 
-No individual control provides complete protection.
+Or more simply:
 
-For example, Managed Identity removes the application's long-lived Azure credential, but a compromised workload may still use its identity.
+```text
+Secret Elimination
+        ↓
+Secure Storage
+        ↓
+Workload Identity
+        ↓
+Least-Privilege Authorization
+        ↓
+Network Isolation
+        ↓
+Lifecycle + Recovery
+        ↓
+Monitoring + Detection
+```
 
-Least-privilege authorization therefore limits the blast radius.
+The biggest lesson for me was:
 
-Network isolation reduces unnecessary reachability.
+> Putting a secret in Key Vault solves the storage problem. It does not solve the entire security problem.
 
-Rotation limits credential lifetime.
-
-Recovery controls protect against destructive actions.
-
-Monitoring provides visibility when preventative controls fail.
+I still have to design identity, authorization, network exposure, lifecycle, recovery, and detection around it.
 
 ---
 
-## Security Design Review
+# Security Review
 
-The final architecture identified the following controls and remaining improvements:
-
-| Security Area | Design |
+| Security Layer | Current Design |
 |---|---|
-| Secret elimination | Prefer Managed Identity / Entra authentication where supported |
-| Secret storage | Azure Key Vault |
-| Workload authentication | Managed Identity |
-| Authorization | Key Vault Secrets User |
-| Scope | Vault or secret scope based on security boundary |
-| Network | Private connectivity planned |
-| Secret lifecycle | Expiration + coordinated rotation |
+| Secret Elimination | Preferred where supported |
+| Secret Storage | Azure Key Vault |
+| Application Authentication | Managed Identity planned |
+| Authorization | Azure RBAC |
+| Human Secret Management | Key Vault Secrets Officer |
+| Application Secret Access | Key Vault Secrets User planned |
+| Authorization Scope | Vault or secret depending on boundary |
+| Network Isolation | Not yet implemented |
+| Expiration | Configured |
+| Rotation | Provider-coordinated process required |
 | Recovery | Soft delete + purge protection |
-| Detection | Audit logging + centralized monitoring |
-| Automation | Terraform planned for future phases |
+| Monitoring | Planned |
+| Automation | Terraform planned for later phase |
 
 ---
 
-## Key Security Takeaways
+# What I Would Improve for Production
 
-1. **Putting a secret in Key Vault only solves the storage problem.**
+The lab intentionally does not represent the final production architecture.
 
-2. Authentication and authorization must be designed separately.
+Before considering this production-ready, I would:
 
-3. Control-plane access does not automatically provide data-plane access.
-
-4. Managed Identity removes application-managed Azure credentials but does not eliminate the impact of workload compromise.
-
-5. Least privilege should consider both the role and its scope.
-
-6. Secret-level RBAC can reduce blast radius when multiple applications share a vault, but security boundaries and operational manageability must also be considered.
-
-7. Expiration is not the same as rotation.
-
-8. Third-party credential rotation must be coordinated with the credential issuer.
-
-9. Soft delete and purge protection provide deletion recovery, not a complete backup strategy.
-
-10. Publicly reachable does not mean publicly accessible, but unnecessary network exposure should still be removed.
-
-11. Infrastructure as Code can make fine-grained authorization and secure-by-default configurations more scalable.
-
-12. Secret management requires multiple layers: identity, authorization, networking, lifecycle, recovery, and detection.
+- Implement the application Managed Identity.
+- Apply the minimum required Key Vault data-plane permissions.
+- Review whether separate vaults or finer-grained RBAC provide the appropriate security boundary.
+- Implement private connectivity where public access is unnecessary.
+- Restrict or disable unnecessary public network access.
+- Establish and test the third-party credential rotation process.
+- Enable centralized logging and monitoring.
+- Move repeatable configuration and RBAC into Infrastructure as Code.
+- Validate both allowed and denied access instead of assuming the configuration works.
 
 ---
 
-## Interview Takeaway
+# Key Takeaways
 
-When reviewing secrets architecture, I should not immediately ask:
+This lab reinforced several principles for me:
 
-> “Which Azure service should I use?”
+**Authentication is not authorization.**
 
-Instead, I should ask:
+**Control-plane access is not the same as data-plane access.**
 
-> Can the secret be eliminated?
+**Managed Identity eliminates one credential, but it does not automatically eliminate every secret.**
 
-> Who needs access?
+**Least privilege is about both role and scope.**
 
-> What is the minimum access required?
+**A compromised workload should not automatically expose unrelated application secrets.**
 
-> At what scope should that access exist?
+**Expiration is not rotation.**
 
-> Does the service need public network connectivity?
+**Publicly reachable does not mean publicly accessible, but unnecessary public reachability should still be removed.**
 
-> How will the credential be rotated?
+**Recovery controls matter because security also has to account for destructive actions.**
 
-> What happens if the workload is compromised?
+**Prevention alone is not enough. I also need detection and visibility.**
 
-> How will deletion be recovered?
+And most importantly:
 
-> How will suspicious access be detected?
-
-This turns secrets management from a product-selection question into a security architecture problem.
+> I don't want to choose a security product first. I want to understand the requirement and risk first, and then choose the control that addresses it.
 
 ---
 
-## Next Phase
+# Next Phase — Private Connectivity
 
-**Lab 05 — Private Connectivity**
+The biggest known gap remaining in the current Key Vault design is network exposure.
 
-The next phase will address the known network-security gap by examining:
+In the next lab, I will focus on:
 
 - Azure Private Endpoints
-- Private IP addressing for Azure PaaS services
+- Private IP connectivity to Azure PaaS services
 - Private DNS
-- Public vs. private service access
-- Disabling unnecessary public network access
-- Connectivity validation
-- Private Endpoint architecture and trade-offs
+- Public vs. private access
+- Restricting unnecessary public network access
+- Validating that private connectivity actually works
